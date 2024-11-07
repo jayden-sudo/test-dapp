@@ -4,9 +4,13 @@ import {
   encrypt,
   recoverPersonalSignature,
   recoverTypedSignature,
+  typedSignatureHash,
+  TypedDataUtils,
+  SignTypedDataVersion,
 } from '@metamask/eth-sig-util';
+import { bufferToHex } from '@metamask/utils';
 import { ethers } from 'ethers';
-import { toChecksumAddress } from 'ethereumjs-util';
+import { toChecksumAddress, hashPersonalMessage } from 'ethereumjs-util';
 import {
   handleSdkConnect,
   handleWalletConnect,
@@ -697,6 +701,7 @@ const renderProviderDetails = () => {
     eip6963Provider.appendChild(pre);
 
     const button = document.createElement('button');
+    button.id = `use-${info.name}`;
     button.className = 'btn btn-primary btn-lg btn-block mb-3';
     button.innerHTML = `Use ${info.name}`;
     button.onclick = () => {
@@ -2338,6 +2343,36 @@ const initializeFormElements = () => {
     siweSign(siweMessageMissing);
   };
 
+  async function eip1271Verify(address, msg, sign) {
+    const eip1271MagicValue = '0x1626ba7e';
+    const callData = ethers.utils.hexConcat([
+      eip1271MagicValue,
+      ethers.utils.defaultAbiCoder.encode(['bytes32', 'bytes'], [msg, sign]),
+    ]);
+    const isValidSignature = await provider.request({
+      method: 'eth_call',
+      params: [
+        {
+          to: address,
+          data: callData,
+          tag: 'latest',
+        },
+      ],
+    });
+    return isValidSignature === eip1271MagicValue;
+  }
+
+  async function isContractWallet(address) {
+    const code = await provider.request({
+      method: 'eth_getCode',
+      params: [address, 'latest'],
+    });
+    if (typeof code !== 'string' || !code.startsWith('0x')) {
+      throw new Error('provider.request::eth_getCode failed');
+    }
+    return code !== '0x';
+  }
+
   /**
    * Personal Sign Verify
    */
@@ -2347,30 +2382,46 @@ const initializeFormElements = () => {
       const from = accounts[0];
       const msg = `0x${Buffer.from(exampleMessage, 'utf8').toString('hex')}`;
       const sign = personalSignResult.innerHTML;
-      const recoveredAddr = recoverPersonalSignature({
-        data: msg,
-        signature: sign,
-      });
-      if (recoveredAddr === from) {
-        console.log(`SigUtil Successfully verified signer as ${recoveredAddr}`);
-        personalSignVerifySigUtilResult.innerHTML = recoveredAddr;
+      const isContract = await isContractWallet(from);
+      if (isContract) {
+        /* EIP-1271 */
+        // msg to personal sign hash
+        const message = Buffer.from(exampleMessage, 'utf8');
+        const msgHash = hashPersonalMessage(message);
+        const isValid = await eip1271Verify(from, msgHash, sign);
+        if (isValid) {
+          personalSignVerifySigUtilResult.innerHTML = 'Valid signature';
+        } else {
+          personalSignVerifySigUtilResult.innerHTML = 'Invalid signature';
+        }
       } else {
-        console.log(
-          `SigUtil Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
-        );
-        console.log(`Failed comparing ${recoveredAddr} to ${from}`);
-      }
-      const ecRecoverAddr = await provider.request({
-        method: 'personal_ecRecover',
-        params: [msg, sign],
-      });
-      if (ecRecoverAddr === from) {
-        console.log(`Successfully ecRecovered signer as ${ecRecoverAddr}`);
-        personalSignVerifyECRecoverResult.innerHTML = ecRecoverAddr;
-      } else {
-        console.log(
-          `Failed to verify signer when comparing ${ecRecoverAddr} to ${from}`,
-        );
+        const recoveredAddr = recoverPersonalSignature({
+          data: msg,
+          signature: sign,
+        });
+        if (recoveredAddr === from) {
+          console.log(
+            `SigUtil Successfully verified signer as ${recoveredAddr}`,
+          );
+          personalSignVerifySigUtilResult.innerHTML = recoveredAddr;
+        } else {
+          console.log(
+            `SigUtil Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
+          );
+          console.log(`Failed comparing ${recoveredAddr} to ${from}`);
+        }
+        const ecRecoverAddr = await provider.request({
+          method: 'personal_ecRecover',
+          params: [msg, sign],
+        });
+        if (ecRecoverAddr === from) {
+          console.log(`Successfully ecRecovered signer as ${ecRecoverAddr}`);
+          personalSignVerifyECRecoverResult.innerHTML = ecRecoverAddr;
+        } else {
+          console.log(
+            `Failed to verify signer when comparing ${ecRecoverAddr} to ${from}`,
+          );
+        }
       }
     } catch (err) {
       console.error(err);
@@ -2425,25 +2476,36 @@ const initializeFormElements = () => {
         value: '1337',
       },
     ];
-    try {
-      const from = accounts[0];
-      const sign = signTypedDataResult.innerHTML;
-      const recoveredAddr = await recoverTypedSignature({
-        data: msgParams,
-        signature: sign,
-        version: 'V1',
-      });
-      if (toChecksumAddress(recoveredAddr) === toChecksumAddress(from)) {
-        console.log(`Successfully verified signer as ${recoveredAddr}`);
-        signTypedDataVerifyResult.innerHTML = recoveredAddr;
+    const from = accounts[0];
+    const sign = signTypedDataResult.innerHTML;
+    if (await isContractWallet(from)) {
+      // calculate hash
+      const typedDataHash = typedSignatureHash(msgParams);
+      const isValid = await eip1271Verify(from, typedDataHash, sign);
+      if (isValid) {
+        signTypedDataVerifyResult.innerHTML = 'Valid signature';
       } else {
-        console.log(
-          `Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
-        );
+        signTypedDataVerifyResult.innerHTML = 'Invalid signature';
       }
-    } catch (err) {
-      console.error(err);
-      signTypedDataVerifyResult.innerHTML = `Error: ${err.message}`;
+    } else {
+      try {
+        const recoveredAddr = await recoverTypedSignature({
+          data: msgParams,
+          signature: sign,
+          version: 'V1',
+        });
+        if (toChecksumAddress(recoveredAddr) === toChecksumAddress(from)) {
+          console.log(`Successfully verified signer as ${recoveredAddr}`);
+          signTypedDataVerifyResult.innerHTML = recoveredAddr;
+        } else {
+          console.log(
+            `Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
+          );
+        }
+      } catch (err) {
+        console.error(err);
+        signTypedDataVerifyResult.innerHTML = `Error: ${err.message}`;
+      }
     }
   };
 
@@ -2533,25 +2595,40 @@ const initializeFormElements = () => {
         contents: 'Hello, Bob!',
       },
     };
-    try {
-      const from = accounts[0];
-      const sign = signTypedDataV3Result.innerHTML;
-      const recoveredAddr = await recoverTypedSignature({
-        data: msgParams,
-        signature: sign,
-        version: 'V3',
-      });
-      if (toChecksumAddress(recoveredAddr) === toChecksumAddress(from)) {
-        console.log(`Successfully verified signer as ${recoveredAddr}`);
-        signTypedDataV3VerifyResult.innerHTML = recoveredAddr;
+    const from = accounts[0];
+    const sign = signTypedDataV3Result.innerHTML;
+    if (await isContractWallet(from)) {
+      // calculate hash
+      const typedDataHashBuffer = TypedDataUtils.eip712Hash(
+        msgParams,
+        SignTypedDataVersion.V3,
+      );
+      const typedDataHash = bufferToHex(typedDataHashBuffer);
+      const isValid = await eip1271Verify(from, typedDataHash, sign);
+      if (isValid) {
+        signTypedDataV3VerifyResult.innerHTML = 'Valid signature';
       } else {
-        console.log(
-          `Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
-        );
+        signTypedDataV3VerifyResult.innerHTML = 'Invalid signature';
       }
-    } catch (err) {
-      console.error(err);
-      signTypedDataV3VerifyResult.innerHTML = `Error: ${err.message}`;
+    } else {
+      try {
+        const recoveredAddr = await recoverTypedSignature({
+          data: msgParams,
+          signature: sign,
+          version: 'V3',
+        });
+        if (toChecksumAddress(recoveredAddr) === toChecksumAddress(from)) {
+          console.log(`Successfully verified signer as ${recoveredAddr}`);
+          signTypedDataV3VerifyResult.innerHTML = recoveredAddr;
+        } else {
+          console.log(
+            `Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
+          );
+        }
+      } catch (err) {
+        console.error(err);
+        signTypedDataV3VerifyResult.innerHTML = `Error: ${err.message}`;
+      }
     }
   };
 
@@ -2671,25 +2748,40 @@ const initializeFormElements = () => {
         ],
       },
     };
-    try {
-      const from = accounts[0];
-      const sign = signTypedDataV4Result.innerHTML;
-      const recoveredAddr = recoverTypedSignature({
-        data: msgParams,
-        signature: sign,
-        version: 'V4',
-      });
-      if (toChecksumAddress(recoveredAddr) === toChecksumAddress(from)) {
-        console.log(`Successfully verified signer as ${recoveredAddr}`);
-        signTypedDataV4VerifyResult.innerHTML = recoveredAddr;
+    const from = accounts[0];
+    const sign = signTypedDataV4Result.innerHTML;
+    if (await isContractWallet(from)) {
+      // calculate hash
+      const typedDataHashBuffer = TypedDataUtils.eip712Hash(
+        msgParams,
+        SignTypedDataVersion.V4,
+      );
+      const typedDataHash = bufferToHex(typedDataHashBuffer);
+      const isValid = await eip1271Verify(from, typedDataHash, sign);
+      if (isValid) {
+        signTypedDataV4VerifyResult.innerHTML = 'Valid signature';
       } else {
-        console.log(
-          `Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
-        );
+        signTypedDataV4VerifyResult.innerHTML = 'Invalid signature';
       }
-    } catch (err) {
-      console.error(err);
-      signTypedDataV4VerifyResult.innerHTML = `Error: ${err.message}`;
+    } else {
+      try {
+        const recoveredAddr = recoverTypedSignature({
+          data: msgParams,
+          signature: sign,
+          version: 'V4',
+        });
+        if (toChecksumAddress(recoveredAddr) === toChecksumAddress(from)) {
+          console.log(`Successfully verified signer as ${recoveredAddr}`);
+          signTypedDataV4VerifyResult.innerHTML = recoveredAddr;
+        } else {
+          console.log(
+            `Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
+          );
+        }
+      } catch (err) {
+        console.error(err);
+        signTypedDataV4VerifyResult.innerHTML = `Error: ${err.message}`;
+      }
     }
   };
 
@@ -2786,17 +2878,24 @@ const initializeFormElements = () => {
     let r;
     let s;
     let v;
-
     try {
       sign = await provider.request({
         method: 'eth_signTypedData_v4',
         params: [from, JSON.stringify(msgParams)],
       });
-      const { _r, _s, _v } = splitSig(sign);
-      r = `0x${_r.toString('hex')}`;
-      s = `0x${_s.toString('hex')}`;
-      v = _v.toString();
-
+      if ((await isContractWallet(from)) === false) {
+        const { _r, _s, _v } = splitSig(sign);
+        r = `0x${_r.toString('hex')}`;
+        s = `0x${_s.toString('hex')}`;
+        v = _v.toString();
+        signPermitResultR.style.display = 'block';
+        signPermitResultS.style.display = 'block';
+        signPermitResultV.style.display = 'block';
+      } else {
+        signPermitResultR.style.display = 'none';
+        signPermitResultS.style.display = 'none';
+        signPermitResultV.style.display = 'none';
+      }
       signPermitResult.innerHTML = sign;
       signPermitResultR.innerHTML = `r: ${r}`;
       signPermitResultS.innerHTML = `s: ${s}`;
@@ -2814,25 +2913,39 @@ const initializeFormElements = () => {
   signPermitVerify.onclick = async () => {
     const from = accounts[0];
     const msgParams = getPermitMsgParams();
-
-    try {
-      const sign = signPermitResult.innerHTML;
-      const recoveredAddr = recoverTypedSignature({
-        data: msgParams,
-        signature: sign,
-        version: 'V4',
-      });
-      if (toChecksumAddress(recoveredAddr) === toChecksumAddress(from)) {
-        console.log(`Successfully verified signer as ${recoveredAddr}`);
-        signPermitVerifyResult.innerHTML = recoveredAddr;
+    const sign = signPermitResult.innerHTML;
+    if (await isContractWallet(from)) {
+      // calculate hash
+      const typedDataHashBuffer = TypedDataUtils.eip712Hash(
+        msgParams,
+        SignTypedDataVersion.V4,
+      );
+      const typedDataHash = bufferToHex(typedDataHashBuffer);
+      const isValid = await eip1271Verify(from, typedDataHash, sign);
+      if (isValid) {
+        signPermitVerifyResult.innerHTML = 'Valid signature';
       } else {
-        console.log(
-          `Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
-        );
+        signPermitVerifyResult.innerHTML = 'Invalid signature';
       }
-    } catch (err) {
-      console.error(err);
-      signPermitVerifyResult.innerHTML = `Error: ${err.message}`;
+    } else {
+      try {
+        const recoveredAddr = recoverTypedSignature({
+          data: msgParams,
+          signature: sign,
+          version: 'V4',
+        });
+        if (toChecksumAddress(recoveredAddr) === toChecksumAddress(from)) {
+          console.log(`Successfully verified signer as ${recoveredAddr}`);
+          signPermitVerifyResult.innerHTML = recoveredAddr;
+        } else {
+          console.log(
+            `Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
+          );
+        }
+      } catch (err) {
+        console.error(err);
+        signPermitVerifyResult.innerHTML = `Error: ${err.message}`;
+      }
     }
   };
 

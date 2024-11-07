@@ -10,8 +10,8 @@ import {
 } from '.';
 
 const dappMetadata = {
-  name: 'E2e Test Dapp',
-  description: 'This is the E2e Test Dapp',
+  name: 'E2e Test Dapp(Smart Contract Compatible)',
+  description: 'This is the E2e Test Dapp(Smart Contract Compatible)',
   url: 'https://metamask.github.io/test-dapp/',
 };
 
