@@ -12,7 +12,7 @@ import {
 const dappMetadata = {
   name: 'E2e Test Dapp(Smart Contract Compatible)',
   description: 'This is the E2e Test Dapp(Smart Contract Compatible)',
-  url: 'https://metamask.github.io/test-dapp/',
+  url: 'https://wallet-e2e-test.vercel.app/',
 };
 
 // eslint-disable-next-line require-unicode-regexp
