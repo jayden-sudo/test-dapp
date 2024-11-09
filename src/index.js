@@ -8,7 +8,6 @@ import {
   TypedDataUtils,
   SignTypedDataVersion,
 } from '@metamask/eth-sig-util';
-import { bufferToHex } from '@metamask/utils';
 import { ethers } from 'ethers';
 import { toChecksumAddress, hashPersonalMessage } from 'ethereumjs-util';
 import {
@@ -197,9 +196,6 @@ const watchAssets = document.getElementById('watchAssets');
 const transferTokens = document.getElementById('transferTokens');
 const transferFromTokens = document.getElementById('transferFromTokens');
 const approveTokens = document.getElementById('approveTokens');
-const increaseTokenAllowance = document.getElementById(
-  'increaseTokenAllowance',
-);
 const allowanceOwnerInput = document.getElementById('allowanceOwner');
 const allowanceSpenderInput = document.getElementById('allowanceSpender');
 const allowanceAmountResult = document.getElementById('allowanceAmountResult');
@@ -422,7 +418,6 @@ const allConnectedButtons = [
   transferTokens,
   transferFromTokens,
   approveTokens,
-  increaseTokenAllowance,
   allowanceOwnerInput,
   allowanceSpenderInput,
   allowanceAmountResult,
@@ -542,6 +537,7 @@ const initialConnectedButtons = [
 const providerDetails = [];
 let provider;
 let accounts = [];
+let smartContractWallet = false;
 let scrollToHandled = false;
 
 const isMetaMaskConnected = () => accounts && accounts.length > 0;
@@ -588,7 +584,7 @@ const detectEip6963 = () => {
 };
 
 export const setActiveProviderDetail = async (providerDetail) => {
-  closeProvider();
+  await closeProvider();
   // When the extension is not installed the providerDetails comes in undefined
   // but because the SDK is already init the window.ethereum has been injected
   // this doesn't mean we can refer to it directly as the connection may have
@@ -603,7 +599,7 @@ export const setActiveProviderDetail = async (providerDetail) => {
     const newAccounts = await provider.request({
       method: 'eth_accounts',
     });
-    handleNewAccounts(newAccounts);
+    await handleNewAccounts(newAccounts);
   } catch (err) {
     console.error('Error on init when getting accounts', err);
   }
@@ -614,7 +610,7 @@ export const setActiveProviderDetail = async (providerDetail) => {
   activeProviderIconResult.innerHTML = icon
     ? `<img src="${icon}" height="90" width="90" />`
     : '';
-  updateFormElements();
+  await updateFormElements();
 };
 
 const setActiveProviderDetailWindowEthereum = async () => {
@@ -711,12 +707,40 @@ const renderProviderDetails = () => {
   });
 };
 
-export const handleNewAccounts = (newAccounts) => {
+async function isContractWallet(address) {
+  const code = await provider.request({
+    method: 'eth_getCode',
+    params: [address, 'latest'],
+  });
+  if (typeof code !== 'string' || !code.startsWith('0x')) {
+    throw new Error('provider.request::eth_getCode failed');
+  }
+  return code !== '0x';
+}
+
+export const handleNewAccounts = async (newAccounts) => {
   accounts = newAccounts;
-  updateFormElements();
+  await updateFormElements();
 
   accountsDiv.innerHTML = accounts;
   fromDiv.value = accounts[0] || '';
+  if (
+    accounts[0] &&
+    accounts[0].startsWith('0x') &&
+    (await isContractWallet(accounts[0]))
+  ) {
+    smartContractWallet = true;
+  } else {
+    smartContractWallet = false;
+  }
+  {
+    const encryptDecryptSection = document.getElementById(
+      'encrypt-decrypt-section',
+    );
+    encryptDecryptSection.style.display = smartContractWallet
+      ? 'none'
+      : 'block';
+  }
   gasPriceDiv.style.display = 'block';
   maxFeeDiv.style.display = 'none';
   maxPriorityDiv.style.display = 'none';
@@ -834,9 +858,9 @@ const handleEIP1559Support = async () => {
 
 // Must be called before the active provider changes
 // Resets provider state and removes any listeners from active provider
-const closeProvider = () => {
+const closeProvider = async () => {
   // move these
-  handleNewAccounts([]);
+  await handleNewAccounts([]);
   handleNewChain('');
   handleNewNetwork('');
   if (isMetaMaskInstalled()) {
@@ -852,7 +876,7 @@ const closeProvider = () => {
 // Initializes active provider and adds any listeners
 const initializeProvider = async () => {
   initializeContracts();
-  updateFormElements();
+  await updateFormElements();
 
   if (isMetaMaskInstalled()) {
     provider.autoRefreshOnNetworkChange = false;
@@ -868,7 +892,7 @@ const initializeProvider = async () => {
       const newAccounts = await provider.request({
         method: 'eth_accounts',
       });
-      handleNewAccounts(newAccounts);
+      await handleNewAccounts(newAccounts);
     } catch (err) {
       console.error('Error on init when getting accounts', err);
     }
@@ -921,6 +945,76 @@ let nftsContract;
 let failingContract;
 let multisigContract;
 let erc1155Contract;
+
+async function deployContract(contractFactory, ...args) {
+  // async deploy(...args: Array<any>): Promise<Contract>
+  if (smartContractWallet) {
+    // get bytecode of contractFactory with args
+    const bytecode = ethers.utils.hexlify(
+      ethers.utils.concat([
+        contractFactory.bytecode,
+        contractFactory.interface.encodeDeploy(args),
+      ]),
+    );
+    const CREATE2_FACTORY = '0x4e59b44847b379578588920cA78FbF26c0B4956C';
+    // random bytes32
+    const salt = ethers.utils.hexlify(ethers.utils.randomBytes(32));
+    const address = ethers.utils.getCreate2Address(
+      CREATE2_FACTORY,
+      salt,
+      ethers.utils.keccak256(bytecode),
+    );
+    const callData = ethers.utils.hexlify(
+      ethers.utils.concat([salt, bytecode]),
+    );
+    // send transaction to CREATE2_FACTORY
+    try {
+      const txHash = await provider.request({
+        method: 'eth_sendTransaction',
+        params: [
+          {
+            from: accounts[0],
+            to: CREATE2_FACTORY,
+            data: callData,
+          },
+        ],
+      });
+      if (typeof txHash === 'string' && txHash !== ethers.constants.HashZero) {
+        // wait the transaction to be included in a block
+        while (
+          (await provider.request({
+            method: 'eth_getTransactionReceipt',
+            params: [txHash],
+          })) === null
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      } else {
+        // throw error
+        throw new Error('Transaction failed');
+      }
+      const contract = contractFactory.attach(address);
+      Object.defineProperty(contract, 'deployTx', {
+        enumerable: true,
+        value: txHash,
+        writable: false,
+      });
+      return contract;
+    } catch (error) {
+      console.error(error);
+      throw error;
+    }
+  } else {
+    const contract = await contractFactory.deploy(...args);
+    await contract.deployTransaction.wait();
+    Object.defineProperty(contract, 'deployTx', {
+      enumerable: true,
+      value: contract.deployTransaction.hash,
+      writable: false,
+    });
+    return contract;
+  }
+}
 
 // Must be called after the active provider changes
 const initializeContracts = () => {
@@ -1000,7 +1094,7 @@ const initializeContracts = () => {
 
 // Must be called after the provider or connect acccounts change
 // Updates form elements content and disabled status
-export const updateFormElements = () => {
+export const updateFormElements = async () => {
   const accountButtonsDisabled =
     !isMetaMaskInstalled() || !isMetaMaskConnected();
   if (accountButtonsDisabled) {
@@ -1015,7 +1109,7 @@ export const updateFormElements = () => {
     }
   }
 
-  updateOnboardElements();
+  await updateOnboardElements();
   updateContractElements();
 };
 
@@ -1031,7 +1125,7 @@ const clearDisplayElements = () => {
   tokenMethodsResult.value = '';
 };
 
-const updateOnboardElements = () => {
+const updateOnboardElements = async () => {
   let onboarding;
   try {
     onboarding = new MetaMaskOnboarding({ forwarderOrigin });
@@ -1065,7 +1159,7 @@ const updateOnboardElements = () => {
         const newAccounts = await provider.request({
           method: 'eth_requestAccounts',
         });
-        handleNewAccounts(newAccounts);
+        await handleNewAccounts(newAccounts);
       } catch (error) {
         console.error(error);
       }
@@ -1138,7 +1232,6 @@ const updateContractElements = () => {
     transferTokens.disabled = false;
     transferFromTokens.disabled = false;
     approveTokens.disabled = false;
-    increaseTokenAllowance.disabled = false;
     allowanceOwnerInput.disabled = false;
     allowanceSpenderInput.disabled = false;
     allowanceAmountResult.disabled = false;
@@ -1159,10 +1252,8 @@ const initializeFormElements = () => {
 
   deployButton.onclick = async () => {
     contractStatus.innerHTML = 'Deploying';
-
     try {
-      piggybankContract = await piggybankFactory.deploy();
-      await piggybankContract.deployTransaction.wait();
+      piggybankContract = await deployContract(piggybankFactory, accounts[0]);
     } catch (error) {
       contractStatus.innerHTML = 'Deployment Failed';
       throw error;
@@ -1173,7 +1264,7 @@ const initializeFormElements = () => {
     }
 
     console.log(
-      `Contract mined! address: ${piggybankContract.address} transactionHash: ${piggybankContract.deployTransaction.hash}`,
+      `Contract mined! address: ${piggybankContract.address} transactionHash: ${piggybankContract.deployTx}`,
     );
     contractStatus.innerHTML = 'Deployed';
     depositButton.disabled = false;
@@ -1184,7 +1275,7 @@ const initializeFormElements = () => {
     contractStatus.innerHTML = 'Deposit initiated';
     const result = await piggybankContract.deposit({
       from: accounts[0],
-      value: '0x3782dace9d900000',
+      value: '0xE35FA931A0000',
     });
     console.log(result);
     const receipt = await result.wait();
@@ -1193,7 +1284,7 @@ const initializeFormElements = () => {
   };
 
   withdrawButton.onclick = async () => {
-    const result = await piggybankContract.withdraw('0xde0b6b3a7640000', {
+    const result = await piggybankContract.withdraw('0x38D7EA4C68000', {
       from: accounts[0],
     });
     console.log(result);
@@ -1210,8 +1301,7 @@ const initializeFormElements = () => {
     failingContractStatus.innerHTML = 'Deploying';
 
     try {
-      failingContract = await failingContractFactory.deploy();
-      await failingContract.deployTransaction.wait();
+      failingContract = await deployContract(failingContractFactory);
     } catch (error) {
       failingContractStatus.innerHTML = 'Deployment Failed';
       throw error;
@@ -1222,7 +1312,7 @@ const initializeFormElements = () => {
     }
 
     console.log(
-      `Contract mined! address: ${failingContract.address} transactionHash: ${failingContract.deployTransaction.hash}`,
+      `Contract mined! address: ${failingContract.address} transactionHash: ${failingContract.deployTx}`,
     );
     failingContractStatus.innerHTML = 'Deployed';
     sendFailingButton.disabled = false;
@@ -1260,8 +1350,7 @@ const initializeFormElements = () => {
     multisigContractStatus.innerHTML = 'Deploying';
 
     try {
-      multisigContract = await multisigFactory.deploy();
-      await multisigContract.deployTransaction.wait();
+      multisigContract = await deployContract(multisigFactory);
     } catch (error) {
       multisigContractStatus.innerHTML = 'Deployment Failed';
       throw error;
@@ -1272,7 +1361,7 @@ const initializeFormElements = () => {
     }
 
     console.log(
-      `Contract mined! address: ${multisigContract.address} transactionHash: ${multisigContract.deployTransaction.hash}`,
+      `Contract mined! address: ${multisigContract.address} transactionHash: ${multisigContract.deployTx}`,
     );
     multisigContractStatus.innerHTML = 'Deployed';
     sendMultisigButton.disabled = false;
@@ -1309,8 +1398,7 @@ const initializeFormElements = () => {
     nftsStatus.innerHTML = 'Deploying';
 
     try {
-      nftsContract = await nftsFactory.deploy();
-      await nftsContract.deployTransaction.wait();
+      nftsContract = await deployContract(nftsFactory);
     } catch (error) {
       nftsStatus.innerHTML = 'Deployment Failed';
       throw error;
@@ -1321,7 +1409,7 @@ const initializeFormElements = () => {
     }
 
     console.log(
-      `Contract mined! address: ${nftsContract.address} transactionHash: ${nftsContract.deployTransaction.hash}`,
+      `Contract mined! address: ${nftsContract.address} transactionHash: ${nftsContract.deployTx}`,
     );
 
     erc721TokenAddresses.innerHTML = erc721TokenAddresses.innerHTML
@@ -1398,15 +1486,24 @@ const initializeFormElements = () => {
         method: 'eth_signTypedData_v4',
         params: [from, JSON.stringify(msgParams)],
       });
-      const { _r, _s, _v } = splitSig(sign);
-      r = `0x${_r.toString('hex')}`;
-      s = `0x${_s.toString('hex')}`;
-      v = _v.toString();
+      if (isContractWallet === true) {
+        sign721PermitResultR.display = `none`;
+        sign721PermitResultS.display = `none`;
+        sign721PermitResultV.display = `none`;
+      } else {
+        sign721PermitResultR.display = `block`;
+        sign721PermitResultS.display = `block`;
+        sign721PermitResultV.display = `block`;
+        const { _r, _s, _v } = splitSig(sign);
+        r = `0x${_r.toString('hex')}`;
+        s = `0x${_s.toString('hex')}`;
+        v = _v.toString();
+        sign721PermitResultR.innerHTML = `r: ${r}`;
+        sign721PermitResultS.innerHTML = `s: ${s}`;
+        sign721PermitResultV.innerHTML = `v: ${v}`;
+      }
 
       sign721PermitResult.innerHTML = sign;
-      sign721PermitResultR.innerHTML = `r: ${r}`;
-      sign721PermitResultS.innerHTML = `s: ${s}`;
-      sign721PermitResultV.innerHTML = `v: ${v}`;
       sign721PermitVerify.disabled = false;
     } catch (err) {
       console.error(err);
@@ -1420,25 +1517,40 @@ const initializeFormElements = () => {
   sign721PermitVerify.onclick = async () => {
     const from = accounts[0];
     const msgParams = await getNFTMsgParams();
+    const sign = sign721PermitResult.innerHTML;
 
-    try {
-      const sign = sign721PermitResult.innerHTML;
-      const recoveredAddr = recoverTypedSignature({
-        data: msgParams,
-        signature: sign,
-        version: 'V4',
-      });
-      if (toChecksumAddress(recoveredAddr) === toChecksumAddress(from)) {
-        console.log(`Successfully verified signer as ${recoveredAddr}`);
-        sign721PermitVerifyResult.innerHTML = recoveredAddr;
+    if (isContractWallet === true) {
+      // calculate hash
+      const typedDataHashBuffer = TypedDataUtils.eip712Hash(
+        msgParams,
+        SignTypedDataVersion.V4,
+      );
+      const typedDataHash = ethers.utils.hexlify(typedDataHashBuffer);
+      const isValid = await eip1271Verify(from, typedDataHash, sign);
+      if (isValid) {
+        sign721PermitVerifyResult.innerHTML = 'Valid signature';
       } else {
-        console.log(
-          `Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
-        );
+        sign721PermitVerifyResult.innerHTML = 'Invalid signature';
       }
-    } catch (err) {
-      console.error(err);
-      sign721PermitVerifyResult.innerHTML = `Error: ${err.message}`;
+    } else {
+      try {
+        const recoveredAddr = recoverTypedSignature({
+          data: msgParams,
+          signature: sign,
+          version: 'V4',
+        });
+        if (toChecksumAddress(recoveredAddr) === toChecksumAddress(from)) {
+          console.log(`Successfully verified signer as ${recoveredAddr}`);
+          sign721PermitVerifyResult.innerHTML = recoveredAddr;
+        } else {
+          console.log(
+            `Failed to verify signer when comparing ${recoveredAddr} to ${from}`,
+          );
+        }
+      } catch (err) {
+        console.error(err);
+        sign721PermitVerifyResult.innerHTML = `Error: ${err.message}`;
+      }
     }
   };
 
@@ -1526,8 +1638,7 @@ const initializeFormElements = () => {
     erc1155Status.innerHTML = 'Deploying';
 
     try {
-      erc1155Contract = await erc1155Factory.deploy();
-      await erc1155Contract.deployTransaction.wait();
+      erc1155Contract = await deployContract(erc1155Factory, accounts[0]);
     } catch (error) {
       erc1155Status.innerHTML = 'Deployment Failed!';
       throw error;
@@ -1538,7 +1649,7 @@ const initializeFormElements = () => {
     }
 
     console.log(
-      `Contract mined! address: ${erc1155Contract.address} transactionHash: ${erc1155Contract.deployTransaction.hash}`,
+      `Contract mined! address: ${erc1155Contract.address} transactionHash: ${erc1155Contract.deployTx}`,
     );
 
     erc1155TokenAddresses.innerHTML = erc1155TokenAddresses.innerHTML
@@ -1901,13 +2012,14 @@ const initializeFormElements = () => {
     const _tokenName = 'TST';
 
     try {
-      hstContract = await hstFactory.deploy(
+      hstContract = await deployContract(
+        hstFactory,
+        accounts[0],
         _initialAmount,
         _tokenName,
         decimalUnitsInput.value,
         tokenSymbol,
       );
-      await hstContract.deployTransaction.wait();
     } catch (error) {
       erc20TokenAddresses.innerHTML = 'Creation Failed';
       throw error;
@@ -1918,7 +2030,7 @@ const initializeFormElements = () => {
     }
 
     console.log(
-      `Contract mined! address: ${hstContract.address} transactionHash: ${hstContract.deployTransaction.hash}`,
+      `Contract mined! address: ${hstContract.address} transactionHash: ${hstContract.deployTx}`,
     );
     erc20TokenAddresses.innerHTML = erc20TokenAddresses.innerHTML
       .concat(', ', hstContract.address)
@@ -1929,7 +2041,6 @@ const initializeFormElements = () => {
     transferTokens.disabled = false;
     transferFromTokens.disabled = false;
     approveTokens.disabled = false;
-    increaseTokenAllowance.disabled = false;
     allowanceOwnerInput.disabled = false;
     allowanceSpenderInput.disabled = false;
     allowanceAmountResult.disabled = false;
@@ -1979,15 +2090,6 @@ const initializeFormElements = () => {
     const result = await hstContract.approve(
       approveTokensToInput.value,
       `${7 * 10 ** decimalUnitsInput.value}`,
-      { from: accounts[0] },
-    );
-    console.log('result', result);
-  };
-
-  increaseTokenAllowance.onclick = async () => {
-    const result = await hstContract.increaseAllowance(
-      approveTokensToInput.value,
-      `${1 * 10 ** decimalUnitsInput.value}`,
       { from: accounts[0] },
     );
     console.log('result', result);
@@ -2362,17 +2464,6 @@ const initializeFormElements = () => {
     return isValidSignature === eip1271MagicValue;
   }
 
-  async function isContractWallet(address) {
-    const code = await provider.request({
-      method: 'eth_getCode',
-      params: [address, 'latest'],
-    });
-    if (typeof code !== 'string' || !code.startsWith('0x')) {
-      throw new Error('provider.request::eth_getCode failed');
-    }
-    return code !== '0x';
-  }
-
   /**
    * Personal Sign Verify
    */
@@ -2382,8 +2473,7 @@ const initializeFormElements = () => {
       const from = accounts[0];
       const msg = `0x${Buffer.from(exampleMessage, 'utf8').toString('hex')}`;
       const sign = personalSignResult.innerHTML;
-      const isContract = await isContractWallet(from);
-      if (isContract) {
+      if (isContractWallet === true) {
         /* EIP-1271 */
         // msg to personal sign hash
         const message = Buffer.from(exampleMessage, 'utf8');
@@ -2478,7 +2568,7 @@ const initializeFormElements = () => {
     ];
     const from = accounts[0];
     const sign = signTypedDataResult.innerHTML;
-    if (await isContractWallet(from)) {
+    if (isContractWallet === true) {
       // calculate hash
       const typedDataHash = typedSignatureHash(msgParams);
       const isValid = await eip1271Verify(from, typedDataHash, sign);
@@ -2597,13 +2687,13 @@ const initializeFormElements = () => {
     };
     const from = accounts[0];
     const sign = signTypedDataV3Result.innerHTML;
-    if (await isContractWallet(from)) {
+    if (isContractWallet === true) {
       // calculate hash
       const typedDataHashBuffer = TypedDataUtils.eip712Hash(
         msgParams,
         SignTypedDataVersion.V3,
       );
-      const typedDataHash = bufferToHex(typedDataHashBuffer);
+      const typedDataHash = ethers.utils.hexlify(typedDataHashBuffer);
       const isValid = await eip1271Verify(from, typedDataHash, sign);
       if (isValid) {
         signTypedDataV3VerifyResult.innerHTML = 'Valid signature';
@@ -2750,13 +2840,13 @@ const initializeFormElements = () => {
     };
     const from = accounts[0];
     const sign = signTypedDataV4Result.innerHTML;
-    if (await isContractWallet(from)) {
+    if (isContractWallet === true) {
       // calculate hash
       const typedDataHashBuffer = TypedDataUtils.eip712Hash(
         msgParams,
         SignTypedDataVersion.V4,
       );
-      const typedDataHash = bufferToHex(typedDataHashBuffer);
+      const typedDataHash = ethers.utils.hexlify(typedDataHashBuffer);
       const isValid = await eip1271Verify(from, typedDataHash, sign);
       if (isValid) {
         signTypedDataV4VerifyResult.innerHTML = 'Valid signature';
@@ -2883,7 +2973,11 @@ const initializeFormElements = () => {
         method: 'eth_signTypedData_v4',
         params: [from, JSON.stringify(msgParams)],
       });
-      if ((await isContractWallet(from)) === false) {
+      if (isContractWallet === true) {
+        signPermitResultR.style.display = 'none';
+        signPermitResultS.style.display = 'none';
+        signPermitResultV.style.display = 'none';
+      } else {
         const { _r, _s, _v } = splitSig(sign);
         r = `0x${_r.toString('hex')}`;
         s = `0x${_s.toString('hex')}`;
@@ -2891,10 +2985,6 @@ const initializeFormElements = () => {
         signPermitResultR.style.display = 'block';
         signPermitResultS.style.display = 'block';
         signPermitResultV.style.display = 'block';
-      } else {
-        signPermitResultR.style.display = 'none';
-        signPermitResultS.style.display = 'none';
-        signPermitResultV.style.display = 'none';
       }
       signPermitResult.innerHTML = sign;
       signPermitResultR.innerHTML = `r: ${r}`;
@@ -2914,13 +3004,13 @@ const initializeFormElements = () => {
     const from = accounts[0];
     const msgParams = getPermitMsgParams();
     const sign = signPermitResult.innerHTML;
-    if (await isContractWallet(from)) {
+    if (isContractWallet === true) {
       // calculate hash
       const typedDataHashBuffer = TypedDataUtils.eip712Hash(
         msgParams,
         SignTypedDataVersion.V4,
       );
-      const typedDataHash = bufferToHex(typedDataHashBuffer);
+      const typedDataHash = ethers.utils.hexlify(typedDataHashBuffer);
       const isValid = await eip1271Verify(from, typedDataHash, sign);
       if (isValid) {
         signPermitVerifyResult.innerHTML = 'Valid signature';
