@@ -1777,7 +1777,7 @@ const initializeFormElements = () => {
             address: eip747ContractAddress.value,
             symbol: eip747Symbol.value,
             decimals: parseInt(eip747Decimals.value, 10),
-            image: 'https://metamask.github.io/test-dapp/metamask-fox.svg',
+            image: 'https://wallet-e2e-test.vercel.app/metamask-fox.svg',
           },
         },
       });
@@ -2064,7 +2064,7 @@ const initializeFormElements = () => {
             address: erc20Address,
             symbol: tokenSymbol,
             decimals: decimalUnitsInput.value,
-            image: 'https://metamask.github.io/test-dapp/metamask-fox.svg',
+            image: 'https://wallet-e2e-test.vercel.app/metamask-fox.svg',
           },
         },
       });
