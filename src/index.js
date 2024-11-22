@@ -1486,7 +1486,7 @@ const initializeFormElements = () => {
         method: 'eth_signTypedData_v4',
         params: [from, JSON.stringify(msgParams)],
       });
-      if (isContractWallet === true) {
+      if (smartContractWallet === true) {
         sign721PermitResultR.display = `none`;
         sign721PermitResultS.display = `none`;
         sign721PermitResultV.display = `none`;
@@ -1519,7 +1519,7 @@ const initializeFormElements = () => {
     const msgParams = await getNFTMsgParams();
     const sign = sign721PermitResult.innerHTML;
 
-    if (isContractWallet === true) {
+    if (smartContractWallet === true) {
       // calculate hash
       const typedDataHashBuffer = TypedDataUtils.eip712Hash(
         msgParams,
@@ -2473,7 +2473,7 @@ const initializeFormElements = () => {
       const from = accounts[0];
       const msg = `0x${Buffer.from(exampleMessage, 'utf8').toString('hex')}`;
       const sign = personalSignResult.innerHTML;
-      if (isContractWallet === true) {
+      if (smartContractWallet === true) {
         /* EIP-1271 */
         // msg to personal sign hash
         const message = Buffer.from(exampleMessage, 'utf8');
@@ -2568,7 +2568,7 @@ const initializeFormElements = () => {
     ];
     const from = accounts[0];
     const sign = signTypedDataResult.innerHTML;
-    if (isContractWallet === true) {
+    if (smartContractWallet === true) {
       // calculate hash
       const typedDataHash = typedSignatureHash(msgParams);
       const isValid = await eip1271Verify(from, typedDataHash, sign);
@@ -2687,7 +2687,7 @@ const initializeFormElements = () => {
     };
     const from = accounts[0];
     const sign = signTypedDataV3Result.innerHTML;
-    if (isContractWallet === true) {
+    if (smartContractWallet === true) {
       // calculate hash
       const typedDataHashBuffer = TypedDataUtils.eip712Hash(
         msgParams,
@@ -2840,7 +2840,7 @@ const initializeFormElements = () => {
     };
     const from = accounts[0];
     const sign = signTypedDataV4Result.innerHTML;
-    if (isContractWallet === true) {
+    if (smartContractWallet === true) {
       // calculate hash
       const typedDataHashBuffer = TypedDataUtils.eip712Hash(
         msgParams,
@@ -2973,7 +2973,7 @@ const initializeFormElements = () => {
         method: 'eth_signTypedData_v4',
         params: [from, JSON.stringify(msgParams)],
       });
-      if (isContractWallet === true) {
+      if (smartContractWallet === true) {
         signPermitResultR.style.display = 'none';
         signPermitResultS.style.display = 'none';
         signPermitResultV.style.display = 'none';
@@ -3004,7 +3004,7 @@ const initializeFormElements = () => {
     const from = accounts[0];
     const msgParams = getPermitMsgParams();
     const sign = signPermitResult.innerHTML;
-    if (isContractWallet === true) {
+    if (smartContractWallet === true) {
       // calculate hash
       const typedDataHashBuffer = TypedDataUtils.eip712Hash(
         msgParams,
