@@ -2461,7 +2461,7 @@ const initializeFormElements = () => {
         },
       ],
     });
-    return isValidSignature === eip1271MagicValue;
+    return isValidSignature.substring(0, 10) === eip1271MagicValue;
   }
 
   /**
